@@ -119,7 +119,7 @@ tft_config	.macro  address, d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d1
 	.global __STACK_END
 	.sect   .stack                  ; Make stack linker segment ?known?
 
-	.data
+	.sect 	".const"
 
 Timer0Period	.word   20000
 Timer1Period	.word   7000
@@ -158,7 +158,86 @@ _main
 RESET	mov.w   #__STACK_END,SP         ; Initialize stackpointer
 StopWDT	mov.w   #WDTPW+WDTHOLD,&WDTCTL  ; Stop WDT
 
+;------------------------------------------------------------------------------
+;           Hard reset / clean startup state
+;------------------------------------------------------------------------------
+HardResetState:
+	nop
+	dint                                ; Disable global interrupts immediately
+	nop
+	
+	; Clear general-purpose registers used by the game.
+	; Do NOT clear R0, R1, R2, or R3.
+	; R0 = PC, R1 = SP, R2 = SR/constant generator, R3 = constant generator.
+	clr.w   R4
+	clr.w   R5
+	clr.w   R6
+	clr.w   R7
+	clr.w   R8
+	clr.w   R9
+	clr.w   R10
+	clr.w   R11
+	clr.w   R12
+	clr.w   R13
+	clr.w   R14
+	clr.w   R15
 
+	; Stop and clear Timer0_A
+	mov.w   #TACLR, &TA0CTL
+	mov.w   #0, &TA0CCTL0
+	mov.w   #0, &TA0CCR0
+
+	; Stop and clear Timer1_A
+	mov.w   #TACLR, &TA1CTL
+	mov.w   #0, &TA1CCTL0
+	mov.w   #0, &TA1CCR0
+	mov.w   #0, &TA1EX0
+
+	; Reset ADC state
+	bic.w   #ADC12ENC, &ADC12CTL0
+	mov.w   #0, &ADC12IER0
+	mov.w   #0, &ADC12IFGR0
+	mov.w   #0, &ADC12CTL0
+	mov.w   #0, &ADC12CTL1
+	mov.w   #0, &ADC12CTL2
+	mov.w   #0, &ADC12MCTL0
+	mov.w   #0, &ADC12MCTL1
+
+	; Reset eUSCI_B0 / SPI state
+	mov.w   #UCSWRST, &UCB0CTLW0
+	mov.w   #0, &UCB0BRW
+	mov.w   #0, &UCB0IE
+	mov.w   #0, &UCB0IFG
+
+	; Clear Port 1 interrupt setup/flags before reconfiguring buttons/SPI pins
+	mov.b   #0, &P1IE
+	mov.b   #0, &P1IFG
+	mov.b   #0, &P1SEL0
+	mov.b   #0, &P1SEL1
+
+	; Clear Port 2 interrupt flags and set TFT control pins safe
+	mov.b   #0, &P2IE
+	mov.b   #0, &P2IFG
+	mov.b   #0, &P2SEL0
+	mov.b   #0, &P2SEL1
+	bis.b   #BIT3+BIT5+BIT7, &P2DIR          ; D/C and CS as outputs
+	bis.b   #BIT5, &P2OUT               ; CS high/inactive
+	bic.b   #BIT3, &P2OUT               ; D/C low default
+
+	; Clear Port 9 state for TFT reset pin
+	mov.b   #0, &P9SEL0
+	mov.b   #0, &P9SEL1
+	bis.b   #BIT4, &P9DIR               ; TFT reset as output
+	bis.b   #BIT4, &P9OUT               ; Reset pin high/inactive
+
+	; Clear any lingering GPIO lock state later in normal setup,
+	; but keep this here too so output settings can actually take effect.
+	bic.w   #LOCKLPM5, &PM5CTL0
+
+	; Give BoosterPack/TFT power a moment to settle after cold plug-in
+	delay   60000
+	delay   60000
+	delay   60000
 
 EditClock:	
 
@@ -185,14 +264,16 @@ SetupTimerA1:
 
 SetupGPIO: 
 
+
 	bis.b   #BIT4+BIT6+BIT7, &P1SEL0     ; Configure Uart TX/RX
 	bic.b   #BIT4+BIT6+BIT7, &P1SEL1
 
-
-	bis.b   #BIT4, &P9OUT ; RESET PIN
+	bis.b   #BIT4, &P9DIR        		; TFT RESET pin as output
+	bis.b   #BIT4, &P9OUT 				; RESET PIN
 	bic.b   #BIT4, &P9OUT
 
-	bis.b   #BIT3+BIT5, &P2DIR
+	; Bit7 is for buzzer
+	bis.b   #BIT3+BIT5+BIT7, &P2DIR
 	
 	mov.w   #UCSWRST, &UCB0CTLW0              ; Reset & lock the UART system
 	bis.w   #UCSSEL__SMCLK+UCSYNC+UCMODE_0+UCMST+UCMSB, &UCB0CTLW0        ; Use SMCLK
@@ -216,6 +297,11 @@ SetupButtons:
 UnlockGPIO	bic.w   #LOCKLPM5,&PM5CTL0      ; Disable the GPIO power-on default
 					; high-impedance mode to activate
 					; previously configured port settings
+			delay	60000
+			delay	60000
+			delay	60000
+			delay 	60000
+			delay 	60000
 
 
 SetupADC12:
@@ -231,9 +317,6 @@ SetupADC12:
 	bis.w   #ADC12IE1,&ADC12IER0 ; Enable ADC conv complete interrupt
 	bis.w   #ADC12ENC+ADC12SC,&ADC12CTL0 ; Start sampling/conversion
 
-	nop
-	eint
-	nop
 	RST_LOW
 	delay   1000
 	RST_HIGH
@@ -266,6 +349,10 @@ Configuration:
 	tft_config  0x36,#0x40
 
 	call #CanvasReset
+
+	nop
+	eint
+	nop
 
 Mainloop:
 
@@ -385,6 +472,10 @@ DrawPaddleLoop
 	jnz         DrawPaddleLoop
 	ret
 
+PaddleTune:
+	call		#PlayLowNote
+	ret		
+
 
 DrawBall:
 	;       R6->X, R7->Y
@@ -424,7 +515,7 @@ MoveBall:
 UpRight:
 	call    #LoadWhite
 	call    #DrawBall
-	call    #LoadBlack
+	call    #LoadRed
 	add.w   &BallStep, R6
 	add.w   &BallStep, R7
 	call    #DrawBall
@@ -432,7 +523,7 @@ UpRight:
 UpLeft:
 	call    #LoadWhite
 	call    #DrawBall
-	call    #LoadBlack
+	call    #LoadRed
 	add.w   &BallStepNeg, R6
 	add.w   &BallStep, R7
 	call    #DrawBall
@@ -440,7 +531,7 @@ UpLeft:
 DownRight:
 	call    #LoadWhite
 	call    #DrawBall
-	call    #LoadBlack
+	call    #LoadRed
 	add.w   &BallStep, R6
 	add.w   &BallStepNeg, R7
 	call    #DrawBall
@@ -448,13 +539,13 @@ DownRight:
 DownLeft:
 	call    #LoadWhite
 	call    #DrawBall
-	call    #LoadBlack
+	call    #LoadRed
 	add.w   &BallStepNeg, R6
 	add.w   &BallStepNeg, R7
 	call    #DrawBall
 	jmp     MoveBallOver
 MoveBallOver:
-	call    #LoadBlack
+	call    #LoadRed
 	ret             
 
 ;  The primary colors we use for this
@@ -469,7 +560,75 @@ LoadWhite:
 	mov.w   #0xFF, R11             ; G
 	mov.w   #0xFF, R13             ; R 
 	ret
+LoadRed:
+	mov.w   #0x00, R10             ; B
+	mov.w   #0x00, R11             ; G
+	mov.w   #0xFF, R13             ; R 
+	ret
 
+
+; Buzzer note helpers
+; Buzzer is j4.0 on the expansion board, which is conencted to pin2.7 on the main board
+; Sending PWM signals really
+
+
+PlayVeryLowNote:
+	mov.w   #200, R12
+
+veryLowLoop
+	bis.b   #BIT7, &P2OUT
+	delay   2000
+	bic.b   #BIT7, &P2OUT
+	delay   2000
+
+	dec.w   R12
+	jnz     veryLowLoop
+
+	ret
+
+PlayLowNote:
+	mov.w   #200, R12
+
+lowLoop
+	bis.b   #BIT7, &P2OUT
+	delay   900
+	bic.b   #BIT7, &P2OUT
+	delay   900
+
+	dec.w   R12
+	jnz     lowLoop
+
+	ret
+
+
+PlayMidNote:
+	mov.w   #250, R12
+
+midLoop
+	bis.b   #BIT7, &P2OUT
+	delay   600
+	bic.b   #BIT7, &P2OUT
+	delay   600
+
+	dec.w   R12
+	jnz     midLoop
+
+	ret
+
+
+PlayHighNote:
+	mov.w   #300, R12
+
+highLoop
+	bis.b   #BIT7, &P2OUT
+	delay   350
+	bic.b   #BIT7, &P2OUT
+	delay   350
+
+	dec.w   R12
+	jnz     highLoop
+
+	ret
 
 CanvasReset:
 	; Setup for writing to display
@@ -487,6 +646,7 @@ CanvasReset:
 	mov.w       &BallStartX, R6    ; Ball X
 	mov.w       &BallStartY, R7     ; Ball Y
 	mov.w       &BallStartDirection, R14     ; Ball Direction Mode. Starting with UpRight
+	call		#LoadRed
 	call        #DrawBall
 
 	ret
@@ -546,8 +706,7 @@ MEM1:
 	; jz          ExitADCISR
 
 CheckUp     
-	mov.w       &JoystickHigh, R5
-	cmp.w       R5,&ADC12MEM1       ; ADCMEM > 3/4 Vcc
+	cmp.w       &JoystickHigh,&ADC12MEM1       ; ADCMEM > 3/4 Vcc
 	jlo         CheckDown              ; No, check the other condition
 
 	;     We have to be careful about moving the "eraser"
@@ -566,8 +725,7 @@ CheckUp
 	reti
 CheckDown
 	;      Shifting the window down
-	mov.w       &JoystickLow, R5
-	cmp.w       R5,&ADC12MEM1
+	cmp.w       &JoystickLow,&ADC12MEM1
 	jge         ExitADCISR
 	mov.w       #-1,R4                   ; Will use this as the direction register
 	cmp.w       &PaddleTopMin,R8
@@ -616,6 +774,7 @@ TIMER0_A0_ISR:
 
 
 
+
 CheckBallBounds:
 
 	; First compare if the left side hit is from the wall or the paddle
@@ -645,10 +804,13 @@ checkPaddleHit
 	jlo         noBound
 	; Paddle Hit
 BallPaddleHit
+	call		#PaddleTune
 	call        #LoadWhite
 	call        #DrawBall
+	; Offeseting the ball to the right after the paddle hit, so that there is not 
+	; weird multi-collision scenario
 	add.w       &BallStep,R6
-	call        #LoadBlack
+	call        #LoadRed
 	call        #DrawBall
 	jmp         flipRight
 	ret
@@ -672,10 +834,23 @@ flipRight
 	ret
 
 gameOver
+	call		#GameOverTune
 	call        #CanvasReset
 	ret
 
-noBound:
+noBound
+	ret
+
+
+GameOverTune:
+	call		#PlayMidNote
+	delay		10000
+	call		#PlayLowNote
+	delay		10000
+	call		#PlayVeryLowNote
+	delay		10000
+	call		#PlayVeryLowNote
+	delay		10000
 	ret
 
 ;------------------------------------------------------------------------------
