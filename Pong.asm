@@ -3,6 +3,37 @@
 ; MAY 2026
 ; Pong
 ;******************************************************************************
+
+;------------------------------------------------------------------------------
+; Register usage notes
+;------------------------------------------------------------------------------
+; R4  = paddle movement direction.
+;       #1 = one direction, #-1 = opposite direction.
+;
+; R5  = temporary scratch register.
+;       Used for ball draw end coordinate and jump-table offset in MoveBall. (Can use)
+;
+; R6  = ball X coordinate.
+; R7  = ball Y coordinate.
+;
+; R8  = paddle top Y coordinate.
+; R9  = paddle bottom Y coordinate.
+;
+; // Potentially can use these 3 in other places
+; R10 = blue color byte for TFT pixel writes.
+; R11 = green color byte for TFT pixel writes.
+; R13 = red color byte for TFT pixel writes.
+;
+; R12 = loop counter.
+;       Used by fill loops, paddle draw loops, ball draw loops, and buzzer note loops.
+;
+; R14 = ball direction state.
+;       0 = UpRight, 1 = UpLeft, 2 = DownRight, 3 = DownLeft.
+;
+; R15 = general subroutine/macro argument register.
+;       Used by delay, send_data, tft_config, tft_cmd_sr, tft_data_sr, and spi_byte. (Can Use)
+;------------------------------------------------------------------------------
+
 ;-------------------------------------------------------------------------------
 	.cdecls C,LIST,"msp430.h"       ; Include device header file
 ;-------------------------------------------------------------------------------
@@ -122,7 +153,7 @@ tft_config	.macro  address, d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d1
 	.sect 	".const"
 
 Timer0Period	.word   20000
-Timer1Period	.word   7000
+Timer1Period	.word   511
 
 ScreenXMin	.word   2
 ScreenXMax	.word   129
@@ -143,12 +174,46 @@ BallStartY	.word   40
 BallStartDirection	.word   0
 BallSizeMinus1	.word   2
 BallPixelCount	.word   9
-BallStep	.word   1
-BallStepNeg	.word   -1
+; BallStep	.word   1
+; BallStepNeg	.word   -1
 
 BallNearPaddleX	.word   23
 BallWallXMin	.word   3
 PaddleTopMin	.word   2
+
+
+; Game State Variables
+	.bss 	GameState, 2
+	.bss	ScoreDigit1, 4
+	.bss	ScoreDigit2, 4
+	.bss	ScoreDigit3, 4
+	.bss	ScoreDigit4, 4
+	.bss	ScoreDigit5, 4
+	.bss	ScoreDigit6, 4
+	.bss 	CurrentDigit, 8
+
+	.bss 	BallStep, 8
+	.bss	BallStepNeg, 8
+
+	
+; LED CONSTS
+; High Segments
+SEGA        .set    1000000000000000b
+SEGB        .set    0100000000000000b
+SEGC        .set    0010000000000000b
+SEGD        .set    0001000000000000b
+SEGE        .set    0000100000000000b
+SEGF        .set    0000010000000000b
+SEGG        .set    0000001000000000b
+SEGM        .set    0000000100000000b
+; Low Segments (MSB padded)
+SEGH        .set    0000000010000000b
+SEGJ        .set    0000000001000000b
+SEGK        .set    0000000000100000b
+SEGP        .set    0000000000010000b
+SEGQ        .set    0000000000001000b
+SEGN        .set    0000000000000010b
+SEGDP       .set    0000000000000001b
 
 	.text                           ; Assemble to Flash memory
 	.retain                         ; Ensure current section gets linked
@@ -230,6 +295,18 @@ HardResetState:
 	bis.b   #BIT4, &P9DIR               ; TFT reset as output
 	bis.b   #BIT4, &P9OUT               ; Reset pin high/inactive
 
+
+	; Game Variables
+	mov.w	#0, &GameState
+	mov.w	#0, &ScoreDigit1
+	mov.w 	#0, &ScoreDigit2
+	mov.w 	#0, &ScoreDigit3
+	mov.w 	#0, &ScoreDigit4
+	mov.w 	#0, &ScoreDigit5
+	mov.w 	#0, &ScoreDigit6
+	mov.w 	#1, &BallStep
+	mov.w 	#-1, &BallStepNeg
+
 	; Clear any lingering GPIO lock state later in normal setup,
 	; but keep this here too so output settings can actually take effect.
 	bic.w   #LOCKLPM5, &PM5CTL0
@@ -239,16 +316,30 @@ HardResetState:
 	delay   60000
 	delay   60000
 
+
+LCD_SETUP:
+
+	mov.w   #1111111111000000b, &LCDCPCTL0 ; Enable specific segments
+	mov.w   #1111000000111111b, &LCDCPCTL1 ; (only the 6 digits)
+	mov.w   #0000000011110000b, &LCDCPCTL2 ;
+
+
+	bis.w   #LCDPRE__16+LCD4MUX, &LCDCCTL0 ; ACLK/16/2=1024Hz
+	bis.w   #LCDCLRM, &LCDCMEMCTL          ; Clear LCD memory
+	bis.w   #LCDON, &LCDCCTL0              ; Turn the LCD ON
+
+
 EditClock:	
 
 	mov.b   #CSKEY_H,&CSCTL0_H      ; Unlock CS registers
 	mov.w   #DCOFSEL_6,&CSCTL1      ; Set DCO setting for 8MHz
-	mov.w   #SELA__VLOCLK+SELS__DCOCLK+SELM__DCOCLK,&CSCTL2 ; set ACLK = VLO
+	mov.w   #SELS__DCOCLK+SELM__DCOCLK,&CSCTL2 ; set ACLK = 32kHz (By Default)
 	mov.w   #DIVA__1+DIVS__1+DIVM__1,&CSCTL3 ; MCLK = SMCLK = DCO = 8MHz
 	clr.b   &CSCTL0_H               ; Lock CS registers
 
 
 SetupTimerA0:
+; 	One memory opperand each operation
 	mov.w   &Timer0Period, R15
 	mov.w   R15, &TA0CCR0              
 	mov.w   #CCIE, &TA0CCTL0            ; Enable CCR0 interrupt
@@ -258,9 +349,9 @@ SetupTimerA0:
 SetupTimerA1:
 	mov.w   &Timer1Period, R15
 	mov.w   R15, &TA1CCR0
-	mov.w   #0, &TA1CCTL0
+	mov.w   #CCIE, &TA1CCTL0			; Enabling CCIE for TA1
 	mov.w   #TAIDEX_7, &TA1EX0
-	mov.w   #TASSEL__SMCLK+ID__8+MC__UP+TACLR, &TA1CTL
+	mov.w   #TASSEL__ACLK+ID__8+MC__UP+TACLR, &TA1CTL
 
 SetupGPIO: 
 
@@ -355,7 +446,6 @@ Configuration:
 	nop
 
 Mainloop:
-
 	jmp Mainloop
 	nop
 
@@ -408,8 +498,8 @@ MovePaddle:
 
 	;       Essentially, everytime we move, we just draw one row of black pixels in front of the the paddle
 	;       and one row of white pixels at the back
-	cmp.w   #1,R4
-	jz      LoadR8White
+	cmp.w   &BallStep,R4
+	jeq     LoadR8White
 LoadR8Black
 	call    #LoadBlack
 	jmp     TopPixelMove
@@ -417,11 +507,19 @@ LoadR8White
 	call    #LoadWhite
 TopPixelMove            
 	tft_config  0x2A,#0x00,&PaddleXLeft,#0x00,&PaddleXRight
-	tft_config  0x2B,#0x00,R8,#0x00,R8
+
+	; extra bit of logic to accomodate different paddle speeds
+	; for speed = 1 -> need to draw only 1 pixel-width paddle left to right pixel layer
+	; but for other speeds, need to draw multiple layers
+	mov.w		R8,R12
+	add.w		&BallStep,R12
+	add.w		#-1,R12
+	tft_config  0x2B,#0x00,R8,#0x00,R12
 	tft_config  0x2C
 
-	; 2 * 1 = 2 pixels
-	mov.w       #2, R12
+	; 2 * ballstep (paddlespeed too for now) pixels being drawn
+	mov.w       &BallStep,R12
+	add.w		&BallStep,R12
 
 TopMovePaddleLoop
 	send_data   R10, R11, R13      ; black pixel, BGR
@@ -430,8 +528,8 @@ TopMovePaddleLoop
 
 
 
-	cmp.w   #-1,R4
-	jz      LoadR9White
+	cmp.w   &BallStepNeg,R4
+	jeq     LoadR9White
 LoadR9Black
 	call    #LoadBlack
 	jmp     BottomPixelMove
@@ -440,17 +538,20 @@ LoadR9White
 	
 BottomPixelMove            
 	tft_config  0x2A,#0x00,&PaddleXLeft,#0x00,&PaddleXRight
-	tft_config  0x2B,#0x00,R9,#0x00,R9
+	mov.w		R9,R12
+	add.w		&BallStep,R12
+	add.w		#-1,R12
+	tft_config  0x2B,#0x00,R9,#0x00,R12
 	tft_config  0x2C
 
-	mov.w       #2, R12
+	mov.w       &BallStep,R12
+	add.w		&BallStep,R12
 
 BottomMovePaddleLoop
 	send_data   R10, R11, R13      ; black pixel, BGR
 	dec.w       R12
 	jnz         BottomMovePaddleLoop
 
-	
 	ret
 
 
@@ -501,6 +602,7 @@ DrawBallLoop:
 	ret       
 
 MoveBall:
+
 	;   we will use R14 as the ball movement mode. 0->(Up,Up),1->(Up,Down),2->(Down,Up),3->(Down,Down)
 	mov.w   R14,R5
 	add.w   R5, R5               ; R14 = R14 * 2
@@ -649,15 +751,197 @@ CanvasReset:
 	call		#LoadRed
 	call        #DrawBall
 
+	mov.w  		#-1,&ScoreDigit1
+	mov.w  		#0,&ScoreDigit2
+	mov.w  		#0,&ScoreDigit3
+	mov.w  		#0,&ScoreDigit4
+	mov.w  		#0,&ScoreDigit5
+	mov.w  		#0,&ScoreDigit6 
+	mov.w 		#1, &BallStep
+	mov.w 		#-1, &BallStepNeg
+
+gameStart
+	bit.b		#BIT2,&P1IN
+	jnz			gameStart
+	mov.w 		#1,&GameState
+
+	bis.w   	#LCDCLRM, &LCDCMEMCTL          ; Clear LCD memory
+
 	ret
+
+CheckBallBounds:
+
+	; First compare if the left side hit is from the wall or the paddle
+	cmp.w       &BallNearPaddleX,R6
+	jlo         checkPaddleHit
+
+	; Bound Comparisons      
+	cmp.w       &ScreenYMax,R7
+	jge         flipDown
+	cmp.w       &BallWallXMin,R7
+	jlo         flipUp
+	cmp.w       &ScreenXMax,R6
+	jge         flipLeft
+	jmp         noBound
+
+checkPaddleHit
+	; If lower than 3, wall ball hit the left wall, and thus game over.
+	cmp.w       &BallWallXMin,R6
+	jlo         gameOver 
+	; Checking if ball is within the paddle width
+	cmp.w       &PaddleXLeft,R6
+	jlo         noBound
+	; Paddle Hit Potentially
+	cmp.w       R9,R7
+	jge         noBound
+	cmp.w       R8,R7
+	jlo         noBound
+	; Paddle Hit
+BallPaddleHit
+	call		#PaddleTune
+	call        #LoadWhite
+	call        #DrawBall
+	; Offeseting the ball to the right after the paddle hit, so that there is not 
+	; weird multi-collision scenario
+	mov.w       &BallNearPaddleX,R6
+	call        #LoadRed
+	call        #DrawBall
+	jmp         flipRight
+
+flipDown
+	; UpRight(0) + 2 -> DownRight, UpLeft(1) + 2 -> DownLeft
+	add.w       #2,R14     
+	jmp			noBound
+flipUp
+	; DownRight(2) - 2 -> UpRight, DownLeft(3) - 2 -> UpLeft
+	add.w       #-2,R14
+	jmp			noBound
+flipLeft
+	; UpRight(0) + 1 -> UpLeft, DownRight(2) + 1 -> DownLeft
+	add.w       #1,R14
+	jmp 		noBound
+
+flipRight
+	; UpLeft(1) - 1 -> UpRight, DownLeft(3) - 1 -> DownRight
+	add.w       #-1,R14
+	jmp			noBound
+
+gameOver
+	call		#GameOverTune
+	call        #CanvasReset
+	jmp			noBound
 	
+
+noBound
+	ret
+
+
+GameOverTune:
+	call		#PlayMidNote
+	delay		10000
+	call		#PlayLowNote
+	delay		10000
+	call		#PlayVeryLowNote
+	delay		10000
+	call		#PlayVeryLowNote
+	delay		10000
+	ret
+
+LCDWrite:
+
+            ; cmp.w   #1, R15         ; Check what char to display
+            ; jlo     LCDWriteEnd     ; Leave if displaying nothing
+			add.w 	R5,R5
+			add.w 	#54,R5
+            mov.w   CHAR(R5), R5  ; Load our pattern to display
+            add.w   &CurrentDigit, PC         ; Jump in the jump table!
+; Jump Table (like a switch statement), completely breaks if R14 > 5!
+            jmp     LCDDig6         ; A1
+            jmp     LCDDig5         ; A2
+            jmp     LCDDig4         ; A3
+            jmp     LCDDig3         ; A4
+            jmp     LCDDig2         ; A5
+            jmp     LCDDig1         ; A6
+LCDDig1     mov.b   R5, &LCDM11
+            swpb    R5
+            mov.b   R5, &LCDM10
+            jmp		LCDWriteEnd
+LCDDig2     mov.b   R5, &LCDM7
+            swpb    R5
+            mov.b   R5, &LCDM6
+            jmp		LCDWriteEnd
+LCDDig3     mov.b   R5, &LCDM5
+            swpb    R5
+            mov.b   R5, &LCDM4
+            jmp		LCDWriteEnd
+LCDDig4     mov.b   R5, &LCDM20
+            swpb    R5
+            mov.b   R5, &LCDM19
+            jmp		LCDWriteEnd
+LCDDig5     mov.b   R5, &LCDM16
+            swpb    R5
+            mov.b   R5, &LCDM15
+            jmp		LCDWriteEnd
+LCDDig6     mov.b   R5, &LCDM9
+            swpb    R5
+            mov.b   R5, &LCDM8
+			
+LCDWriteEnd	
+			ret
+
+;------------------------------------------------------------------------------
+;           Look Up Tables
+;------------------------------------------------------------------------------
+	
+
+CHAR:       .word   SEGA+SEGB+SEGC+SEGE+SEGF+SEGG+SEGM ; A
+            .word   SEGA+SEGD+SEGE+SEGF+SEGG+SEGK+SEGN ; B
+            .word   SEGA+SEGD+SEGE+SEGF ; C
+            .word   SEGA+SEGB+SEGC+SEGD+SEGE+SEGF ; D
+            .word   SEGA+SEGD+SEGE+SEGF+SEGG+SEGM ; E
+            .word   SEGA+SEGE+SEGF+SEGG+SEGM ; F
+            .word   SEGA+SEGC+SEGD+SEGE+SEGF+SEGM ; G
+            .word   SEGB+SEGC+SEGE+SEGF+SEGG+SEGM ; H
+            .word   SEGA+SEGD+SEGJ+SEGP ; I
+            .word   SEGA+SEGB+SEGC+SEGD+SEGE ; J
+            .word   SEGE+SEGF+SEGG+SEGK+SEGN ; K
+            .word   SEGD+SEGE+SEGF ; L
+            .word   SEGB+SEGC+SEGE+SEGF+SEGH+SEGK ; M
+            .word   SEGB+SEGC+SEGE+SEGF+SEGH+SEGN ; N
+            .word   SEGA+SEGB+SEGC+SEGD+SEGE+SEGF+SEGH+SEGK+SEGQ+SEGN ; O
+            .word   SEGA+SEGB+SEGE+SEGF+SEGG+SEGM ; P
+            .word   SEGA+SEGB+SEGC+SEGD+SEGE+SEGF+SEGN ; Q
+            .word   SEGA+SEGB+SEGE+SEGF+SEGG+SEGM+SEGN ; R
+            .word   SEGA+SEGC+SEGD+SEGF+SEGG+SEGM ; S
+            .word   SEGA+SEGJ+SEGP ; T
+            .word   SEGB+SEGC+SEGD+SEGE+SEGF ; U
+            .word   SEGE+SEGF+SEGQ+SEGK ; V
+            .word   SEGB+SEGC+SEGE+SEGF+SEGQ+SEGN ; W
+            .word   SEGH+SEGK+SEGQ+SEGN ; X
+            .word   SEGH+SEGK+SEGP ; Y
+            .word   SEGA+SEGD+SEGK+SEGQ ; Z
+SPACE:      .word   0       ; Space
+DIGIT:      .word   SEGA+SEGB+SEGC+SEGD+SEGE+SEGF ; 0
+            .word   SEGB+SEGC   ; 1
+            .word   SEGA+SEGB+SEGD+SEGE+SEGG+SEGM ; 2
+            .word   SEGA+SEGB+SEGC+SEGD+SEGG+SEGM   ;3
+            .word   SEGB+SEGC+SEGF+SEGG+SEGM    ; 4
+            .word   SEGA+SEGC+SEGD+SEGF+SEGG+SEGM   ; 5
+            .word   SEGA+SEGC+SEGD+SEGE+SEGF+SEGG+SEGM ; 6
+            .word   SEGA+SEGB+SEGC  ; 7
+            .word   SEGA+SEGD+SEGH+SEGK+SEGQ+SEGN ; 8
+            .word   SEGA+SEGB+SEGC+SEGD+SEGF+SEGG+SEGM ; 9
+
 ;------------------------------------------------------------------------------
 ;           Interrupt Service Routines
 ;------------------------------------------------------------------------------
 
 ; This is for the JoyStick
 
-ADC12_ISR:	add.w       &ADC12IV,PC             ; add offset to PC
+ADC12_ISR:	
+	cmp.w 		#0, &GameState
+	jeq			ExitADCISR
+	add.w       &ADC12IV,PC             ; add offset to PC
 	reti                            ; Vector  0:  No interrupt
 	reti                            ; Vector  2:  ADC12MEMx Overflow
 	reti                            ; Vector  4:  Conversion time overflow
@@ -712,8 +996,9 @@ CheckUp
 	;     We have to be careful about moving the "eraser"
 	;     The eraser should move only after the erasing is done i.e. the function call is done 
 	;     Shifting the window up       
-	mov.w       #1,R4                   ; Will use this as the direction register
+	mov.w       &BallStep,R4                   ; Will use this as the direction register
 	cmp.w       &ScreenYMax,R9
+	; Will have to change this for different paddle speeds
 	jge         ExitADCISR
 	add.w       R4,R8
 	call        #MovePaddle
@@ -727,7 +1012,7 @@ CheckDown
 	;      Shifting the window down
 	cmp.w       &JoystickLow,&ADC12MEM1
 	jge         ExitADCISR
-	mov.w       #-1,R4                   ; Will use this as the direction register
+	mov.w       &BallStepNeg,R4                   ; Will use this as the direction register
 	cmp.w       &PaddleTopMin,R8
 	jlo         ExitADCISR
 	add.w       R4,R9
@@ -746,6 +1031,8 @@ ExitADCISR
 ; This is for handling the button inputs
 
 PORT1_ISR:
+	cmp.w 		#0, &GameState
+	jeq			ExitPort1ISR
 	add.w       &P1IV, PC              ; Use P1IV for Port 1 interrupts
 
 	reti                            ; 0: no interrupt
@@ -758,100 +1045,80 @@ PORT1_ISR:
 	reti                            ; 14: P1.6
 	reti                            ; 16: P1.7
 
-Left_Pressed_ISR:
+Left_Pressed_ISR
+	mov.w 		#0, &GameState
 	call        #CanvasReset
 	reti
 
 
-Right_Pressed_ISR:
+Right_Pressed_ISR
+	jmp			ExitPort1ISR
+
+ExitPort1ISR
 	reti
 
 	
+
+	
 TIMER0_A0_ISR:
+BallMoveCheck:
 	call        #MoveBall
 	call        #CheckBallBounds
 	reti
 
+ExitTimer0A0ISR
+	reti
 
 
 
-CheckBallBounds:
 
-	; First compare if the left side hit is from the wall or the paddle
-	cmp.w       &BallNearPaddleX,R6
-	jlo         checkPaddleHit
+Timer1_A0_ISR:
+ScoreUpdater:
+Digit1
+	cmp.w 	#9,&ScoreDigit1
+	jeq		Digit2
+	add.w	#1,&ScoreDigit1
+	
+	mov.w	&ScoreDigit1,R5
+	mov.w	#0,&CurrentDigit
+	call	#LCDWrite
+	reti
+Digit2
+	mov.w	#0,&ScoreDigit1
+	mov.w	#2,&BallStep
+	mov.w	#-2,&BallStepNeg
+	cmp.w 	#9,&ScoreDigit2
+	jeq		Digit3
+	add.w	#1,&ScoreDigit2
+	
+	mov.w	&ScoreDigit1,R5
+	mov.w	#0,&CurrentDigit
+	call	#LCDWrite
+	mov.w	&ScoreDigit2,R5
+	mov.w	#2,&CurrentDigit
+	call	#LCDWrite
+	reti
+Digit3
+	mov.w	#0,&ScoreDigit2
+	cmp.w 	#9,&ScoreDigit3
+	jeq		Digit4
+	add.w	#1,&ScoreDigit3
+	
+	mov.w	&ScoreDigit1,R5
+	mov.w	#0,&CurrentDigit
+	call	#LCDWrite
+	mov.w	&ScoreDigit2,R5
+	mov.w	#2,&CurrentDigit
+	call	#LCDWrite
+	mov.w	&ScoreDigit3,R5
+	mov.w	#4,&CurrentDigit
+	call	#LCDWrite
 
-	; Bound Comparisons      
-	cmp.w       &ScreenYMax,R7
-	jge         flipDown
-	cmp.w       &BallWallXMin,R7
-	jlo         flipUp
-	cmp.w       &ScreenXMax,R6
-	jge         flipLeft
-	jmp         noBound
-
-checkPaddleHit
-	; If lower than 3, wall ball hit the left wall, and thus game over.
-	cmp.w       &BallWallXMin,R6
-	jlo         gameOver 
-	; Checking if ball is within the paddle width
-	cmp.w       &PaddleXLeft,R6
-	jlo         noBound
-	; Paddle Hit Potentially
-	cmp.w       R9,R7
-	jge         noBound
-	cmp.w       R8,R7
-	jlo         noBound
-	; Paddle Hit
-BallPaddleHit
-	call		#PaddleTune
-	call        #LoadWhite
-	call        #DrawBall
-	; Offeseting the ball to the right after the paddle hit, so that there is not 
-	; weird multi-collision scenario
-	add.w       &BallStep,R6
-	call        #LoadRed
-	call        #DrawBall
-	jmp         flipRight
-	ret
-
-flipDown
-	; UpRight(0) + 2 -> DownRight, UpLeft(1) + 2 -> DownLeft
-	add.w       #2,R14     
-	ret
-flipUp
-	; DownRight(2) - 2 -> UpRight, DownLeft(3) - 2 -> UpLeft
-	add.w       #-2,R14
-	ret
-flipLeft
-	; UpRight(0) + 1 -> UpLeft, DownRight(2) + 1 -> DownLeft
-	add.w       #1,R14
-	ret
-
-flipRight
-	; UpLeft(1) - 1 -> UpRight, DownLeft(3) - 1 -> DownRight
-	add.w       #-1,R14
-	ret
-
-gameOver
-	call		#GameOverTune
-	call        #CanvasReset
-	ret
-
-noBound
-	ret
+Digit4
+	reti
 
 
-GameOverTune:
-	call		#PlayMidNote
-	delay		10000
-	call		#PlayLowNote
-	delay		10000
-	call		#PlayVeryLowNote
-	delay		10000
-	call		#PlayVeryLowNote
-	delay		10000
-	ret
+
 
 ;------------------------------------------------------------------------------
 ;           Interrupt Vectors
@@ -862,6 +1129,8 @@ GameOverTune:
 	.short      ADC12_ISR               ;
 	.sect       TIMER0_A0_VECTOR
 	.short      TIMER0_A0_ISR
+	.sect       TIMER1_A0_VECTOR
+	.short      Timer1_A0_ISR
 	.sect       PORT1_VECTOR
 	.short      PORT1_ISR
 	.end
