@@ -160,6 +160,11 @@ ScreenXMax	.word   129
 ScreenYMin	.word   1
 ScreenYMax	.word   128
 
+FlipOffset1	.word 1
+FlipOffsetNeg1 .word -1
+FlipOffset2	.word 2
+FlipOffsetNeg2 .word -2
+
 JoystickHigh	.word   3072
 JoystickLow	.word   1024
 
@@ -169,8 +174,8 @@ PaddleStartTop	.word   20
 PaddleStartBottom	.word   51
 PaddlePixelCount	.word   64
 
-BallStartX	.word   100
-BallStartY	.word   40
+BallStartX	.word   70
+BallStartY	.word   60
 BallStartDirection	.word   0
 BallSizeMinus1	.word   2
 BallPixelCount	.word   9
@@ -180,20 +185,21 @@ BallPixelCount	.word   9
 BallNearPaddleX	.word   23
 BallWallXMin	.word   3
 PaddleTopMin	.word   2
-
+PaddleHitFlag	.word	1
+PaddleNotHitFlag .word  0
 
 ; Game State Variables
 	.bss 	GameState, 2
-	.bss	ScoreDigit1, 4
-	.bss	ScoreDigit2, 4
-	.bss	ScoreDigit3, 4
-	.bss	ScoreDigit4, 4
-	.bss	ScoreDigit5, 4
-	.bss	ScoreDigit6, 4
-	.bss 	CurrentDigit, 8
+	.bss	ScoreDigit1, 2
+	.bss	ScoreDigit2, 2
+	.bss	ScoreDigit3, 2
+	.bss	ScoreDigit4, 2
+	.bss	ScoreDigit5, 2
+	.bss	ScoreDigit6, 2
+	.bss 	CurrentDigit, 2
 
-	.bss 	BallStep, 8
-	.bss	BallStepNeg, 8
+	.bss 	BallStep, 2
+	.bss	BallStepNeg, 2
 
 	
 ; LED CONSTS
@@ -778,7 +784,7 @@ CheckBallBounds:
 	; Bound Comparisons      
 	cmp.w       &ScreenYMax,R7
 	jge         flipDown
-	cmp.w       &BallWallXMin,R7
+	cmp.w       &ScreenYMin,R7
 	jlo         flipUp
 	cmp.w       &ScreenXMax,R6
 	jge         flipLeft
@@ -803,28 +809,48 @@ BallPaddleHit
 	call        #DrawBall
 	; Offeseting the ball to the right after the paddle hit, so that there is not 
 	; weird multi-collision scenario
-	mov.w       &BallNearPaddleX,R6
-	call        #LoadRed
-	call        #DrawBall
-	jmp         flipRight
+	jmp         paddleHitFlipRight
 
 flipDown
 	; UpRight(0) + 2 -> DownRight, UpLeft(1) + 2 -> DownLeft
+	mov.w		&ScreenYMax,R7
+	add.w 		&FlipOffsetNeg2,R7
 	add.w       #2,R14     
-	jmp			noBound
+	jmp			CheckBallBounds
 flipUp
 	; DownRight(2) - 2 -> UpRight, DownLeft(3) - 2 -> UpLeft
+	call        #LoadWhite
+	call        #DrawBall
+	; Weird edge case solve
+	mov.w 		&ScreenYMin,R7
+	add.W		&FlipOffset2,R7
+	call        #LoadRed
+	call        #DrawBall
 	add.w       #-2,R14
-	jmp			noBound
+	jmp			CheckBallBounds
 flipLeft
 	; UpRight(0) + 1 -> UpLeft, DownRight(2) + 1 -> DownLeft
+	mov.w		&ScreenXMax,R6
+	add.w		&FlipOffsetNeg2,R6
 	add.w       #1,R14
-	jmp 		noBound
+	jmp 		CheckBallBounds
 
 flipRight
 	; UpLeft(1) - 1 -> UpRight, DownLeft(3) - 1 -> DownRight
+paddleNotHit
+	mov.w 		&ScreenXMin,R6
+	add.w		&FlipOffset2,R6
 	add.w       #-1,R14
-	jmp			noBound
+
+	jmp			CheckBallBounds
+paddleHitFlipRight
+	mov.w 		&BallNearPaddleX,R6
+	add.w		&FlipOffset2,R6
+	call        #LoadRed
+	call        #DrawBall
+	add.w       #-1,R14
+	; call		#DrawPaddle
+	jmp 		CheckBallBounds
 
 gameOver
 	call		#GameOverTune
