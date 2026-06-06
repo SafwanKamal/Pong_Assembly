@@ -187,6 +187,7 @@ BallWallXMin	.word   3
 PaddleTopMin	.word   2
 PaddleHitFlag	.word	1
 PaddleNotHitFlag .word  0
+PaddleHeightMinus1	.word	31
 
 ; Game State Variables
 	.bss 	GameState, 2
@@ -724,6 +725,62 @@ midLoop
 	ret
 
 
+; SetRandomBallXY
+;
+; Output:
+;   R6 = random Ball X, roughly 60 to 123
+;   R7 = random Ball Y, roughly 40 + (0 + 127) / 2
+
+
+SetRandomBallXY:
+	
+	mov.w   &ADC12MEM1, R5
+	xor.w   &TA0R, R5
+
+	; Make range 0-63
+	and.w   #0x003F, R5
+
+	; Shifting into screen-safe X range: 60-123
+	add.w   #60, R5
+	mov.w   R5, R6
+
+
+	
+	mov.w   &ADC12MEM1, R5
+	xor.w   &TA1R, R5
+
+	; Mixing it a little differently from X
+	rra.w   R5
+	xor.w   &TA0R, R5
+
+	; Make range 0-95
+	and.w   #0x007F, R5        ; first make 0-127
+
+	rra.w   R5					; Range Becomes 0-63
+	add.w	#40, R5				; Doing this to ensure ball is to the right of the paddle
+	mov.w	R5, R7
+
+	ret
+
+
+
+SetRandomPaddleX:
+	
+	mov.w   &ADC12MEM0, R5
+	xor.w   &TA1R, R5
+
+	; Make range 0-63
+	and.w   #0x003F, R5
+
+	; Shifting into screen-safe X range: 40-103
+	add.w   #40, R5
+	mov.w   R5, R8
+	mov.w 	R8, R9
+	add.w	&PaddleHeightMinus1, R9
+
+	ret
+
+
 PlayHighNote:
 	mov.w   #300, R12
 
@@ -747,12 +804,14 @@ CanvasReset:
 
 	call        #WhiteBakgroundSetter  
 	
-	mov.w       &PaddleStartTop, R8     ; row start
-	mov.w       &PaddleStartBottom, R9     ; row end = row_start + 31 for now
+	; mov.w       &PaddleStartTop, R8     ; row start
+	; mov.w       &PaddleStartBottom, R9     ; row end = row_start + 31 for now
+	call		#SetRandomPaddleX
 	call        #DrawPaddle
 			
-	mov.w       &BallStartX, R6    ; Ball X
-	mov.w       &BallStartY, R7     ; Ball Y
+	; mov.w       &BallStartX, R6    ; Ball X
+	; mov.w       &BallStartY, R7     ; Ball Y
+	call 		#SetRandomBallXY
 	mov.w       &BallStartDirection, R14     ; Ball Direction Mode. Starting with UpRight
 	call		#LoadRed
 	call        #DrawBall
